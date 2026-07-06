@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>VR的当てシューティング</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; overflow: hidden;
+    width: 100%; height: 100%;
+    background: #04030a;
+    font-family: 'Courier New', ui-monospace, monospace;
+    -webkit-user-select: none; user-select: none;
+    touch-action: none;
+  }
+  canvas { display: block; }
+
+  #crosshair {
+    position: fixed; top: 50%; left: 50%;
+    width: 46px; height: 46px;
+    transform: translate(-50%, -50%);
+    pointer-events: none; z-index: 10;
+  }
+  #crosshair .ring {
+    position: absolute; inset: 0;
+    border: 2px solid rgba(80, 255, 220, 0.55);
+    border-radius: 50%;
+  }
+  #crosshair .dot {
+    position: absolute; top: 50%; left: 50%;
+    width: 5px; height: 5px;
+    background: #7dffe0;
+    box-shadow: 0 0 8px 2px #4dffcf;
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+  }
+  #crosshair.hitflash .ring { border-color: #ff5b8d; box-shadow: 0 0 14px 2px #ff5b8d; }
+
+  #hud {
+    position: fixed; top: 18px; left: 50%; transform: translateX(-50%);
+    z-index: 10; color: #9dfff0; text-align: center;
+    letter-spacing: 2px;
+  }
+  #hud .label { font-size: 11px; opacity: 0.6; }
+  #hud .score { font-size: 30px; font-weight: bold; text-shadow: 0 0 10px rgba(90,255,220,0.8); }
+
+  #msg {
+    position: fixed; bottom: 22px; width: 100%; text-align: center;
+    color: #7dffe0; font-size: 12px; letter-spacing: 1px; z-index: 10;
+    opacity: 0.75; text-shadow: 0 0 6px rgba(0,0,0,0.8);
+  }
+
+  #startScreen {
+    position: fixed; inset: 0; z-index: 30;
+    background: radial-gradient(ellipse at 50% 30%, #131033 0%, #04030a 70%);
+    color: #eafffb; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; text-align: center;
+    padding: 24px;
+  }
+  #startScreen .eyebrow {
+    font-size: 11px; letter-spacing: 4px; color: #ff5b8d; margin-bottom: 10px;
+  }
+  #startScreen h1 {
+    font-size: 26px; margin: 0 0 14px; letter-spacing: 3px;
+    color: #9dfff0; text-shadow: 0 0 16px rgba(90,255,220,0.5);
+  }
+  #startScreen p {
+    font-size: 13px; line-height: 1.9; max-width: 300px; opacity: 0.75;
+  }
+  #startBtn {
+    margin-top: 30px; padding: 14px 46px; font-size: 15px;
+    letter-spacing: 3px; font-family: inherit; font-weight: bold;
+    border: 1px solid #7dffe0; border-radius: 2px;
+    background: transparent; color: #7dffe0;
+    box-shadow: 0 0 18px rgba(90,255,220,0.35) inset;
+  }
+  #startBtn:active { background: rgba(90,255,220,0.15); }
+</style>
+</head>
+<body>
+
+<div id="startScreen">
+  <div class="eyebrow">GYRO TARGET RANGE</div>
+  <h1>VR的当てシューティング</h1>
+  <p>スマホを持って周りを見渡すのら。中央の照準を的に合わせて画面をタップすると弾が出るで。命中したら的が砕けるから、どんどん割っていくのら。</p>
+  <button id="startBtn">START</button>
+</div>
+
+<div id="crosshair"><div class="ring"></div><div class="dot"></div></div>
+<div id="hud"><div class="label">SCORE</div><div class="score" id="score">0</div></div>
+<div id="msg"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function(){
+  let scene, camera, renderer;
+  let targets = [], projectiles = [], fragments = [];
+  let score = 0;
+  let orientationEnabled = false;
+  let usingMouse = false;
+  let deviceOrient = { alpha: 0, beta: 0, gamma: 0 };
+  let mouseLook = { x: 0, y: 0 };
+
+  const scoreEl = document.getElementById('score');
+  const crosshairEl = document.getElementById('crosshair');
+  const msgEl = document.getElementById('msg');
+
+  init();
+  animate();
+
+  function init(){
+    scene = new THREE.Scene();
+    scene.fog = new THREE.FogExp2(0x04030a, 0.004);
+    addStarfield();
+
+    camera = new THREE.PerspectiveCamera(72, window.innerWidth/window.innerHeight, 0.1, 500);
+    camera.position.set(0,0,0);
+
+    renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setClearColor(0x04030a);
+    document.body.appendChild(renderer.domElement);
+
+    scene.add(new THREE.HemisphereLight(0xbfe8ff, 0x1a0a2a, 1.1));
+    const key = new THREE.PointLight(0x7dffe0, 1.2, 60);
+    key.position.set(0, 5, 5);
+    scene.add(key);
+
+    for (let i = 0; i < 6; i++) spawnTarget();
+
+    window.addEventListener('resize', onResize);
+    document.getElementById('startBtn').addEventListener('click', startGame);
+    renderer.domElement.addEventListener('click', fire);
+    renderer.domElement.addEventListener('touchstart', function(e){ e.preventDefault(); fire(); }, { passive: false });
+  }
+
+  function addStarfield(){
+    const positions = [];
+    for (let i = 0; i < 1200; i++) {
+      const r = 150 + Math.random() * 100;
+      const theta = Math.random() * Math.PI * 2;
+      const phi = Math.acos(Math.random() * 2 - 1);
+      positions.push(
+        r * Math.sin(phi) * Math.cos(theta),
+        r * Math.sin(phi) * Math.sin(theta),
+        r * Math.cos(phi)
+      );
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    const mat = new THREE.PointsMaterial({ color: 0xaad4ff, size: 1.1, sizeAttenuation: false });
+    scene.add(new THREE.Points(geo, mat));
+  }
+
+  function randomTargetPosition(){
+    const dist = 14 + Math.random() * 10;
+    const azimuth = Math.random() * Math.PI * 2;
+    const elevation = THREE.MathUtils.degToRad(-15 + Math.random() * 55);
+    const x = dist * Math.cos(elevation) * Math.sin(azimuth);
+    const y = dist * Math.sin(elevation);
+    const z = -dist * Math.cos(elevation) * Math.cos(azimuth);
+    return new THREE.Vector3(x, y, z);
+  }
+
+  function spawnTarget(){
+    const geo = new THREE.IcosahedronGeometry(1.15, 0);
+    const mat = new THREE.MeshStandardMaterial({
+      color: 0xff5b8d, emissive: 0xff1f5e, emissiveIntensity: 0.4,
+      metalness: 0.2, roughness: 0.35
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.copy(randomTargetPosition());
+    mesh.userData.spin = (Math.random() - 0.5) * 0.02;
+    scene.add(mesh);
+    targets.push(mesh);
+  }
+
+  function fire(){
+    if (!orientationEnabled) return;
+    const dir = new THREE.Vector3();
+    camera.getWorldDirection(dir);
+
+    const geo = new THREE.SphereGeometry(0.14, 10, 10);
+    const mat = new THREE.MeshBasicMaterial({ color: 0x9dfff0 });
+    const bullet = new THREE.Mesh(geo, mat);
+    bullet.position.copy(camera.position).add(dir.clone().multiplyScalar(0.6));
+    bullet.userData.velocity = dir.clone().multiplyScalar(1.4);
+    bullet.userData.life = 60;
+    scene.add(bullet);
+    projectiles.push(bullet);
+  }
+
+  function flashCrosshair(){
+    crosshairEl.classList.add('hitflash');
+    setTimeout(() => crosshairEl.classList.remove('hitflash'), 120);
+  }
+
+  function breakTarget(target){
+    const pos = target.position.clone();
+    scene.remove(target);
+    targets.splice(targets.indexOf(target), 1);
+
+    for (let i = 0; i < 12; i++) {
+      const size = 0.2 + Math.random() * 0.2;
+      const geo = new THREE.BoxGeometry(size, size, size);
+      const mat = new THREE.MeshStandardMaterial({
+        color: 0xff5b8d, emissive: 0xff1f5e, emissiveIntensity: 0.5,
+        transparent: true, opacity: 1
+      });
+      const frag = new THREE.Mesh(geo, mat);
+      frag.position.copy(pos);
+      frag.userData.velocity = new THREE.Vector3(
+        (Math.random() - 0.5) * 0.35,
+        Math.random() * 0.3,
+        (Math.random() - 0.5) * 0.35
+      );
+      frag.userData.spin = new THREE.Vector3(Math.random()*0.2, Math.random()*0.2, Math.random()*0.2);
+      frag.userData.life = 40;
+      frag.userData.maxLife = 40;
+      scene.add(frag);
+      fragments.push(frag);
+    }
+
+    score++;
+    scoreEl.textContent = score;
+    flashCrosshair();
+    setTimeout(spawnTarget, 450);
+  }
+
+  function updateProjectiles(){
+    for (let i = projectiles.length - 1; i >= 0; i--) {
+      const p = projectiles[i];
+      p.position.add(p.userData.velocity);
+      p.userData.life--;
+
+      let hit = false;
+      for (const t of targets) {
+        if (p.position.distanceTo(t.position) < 1.35) {
+          breakTarget(t);
+          hit = true;
+          break;
+        }
+      }
+      if (hit || p.userData.life <= 0) {
+        scene.remove(p);
+        projectiles.splice(i, 1);
+      }
+    }
+  }
+
+  function updateFragments(){
+    for (let i = fragments.length - 1; i >= 0; i--) {
+      const f = fragments[i];
+      f.userData.velocity.y -= 0.012;
+      f.position.add(f.userData.velocity);
+      f.rotation.x += f.userData.spin.x;
+      f.rotation.y += f.userData.spin.y;
+      f.userData.life--;
+      f.material.opacity = Math.max(f.userData.life / f.userData.maxLife, 0);
+      if (f.userData.life <= 0) {
+        scene.remove(f);
+        fragments.splice(i, 1);
+      }
+    }
+  }
+
+  function updateTargets(){
+    for (const t of targets) {
+      t.rotation.y += t.userData.spin;
+      t.rotation.x += t.userData.spin * 0.6;
+    }
+  }
+
+  // --- gyro control ---
+  function handleOrientation(e){
+    deviceOrient.alpha = e.alpha || 0;
+    deviceOrient.beta = e.beta || 0;
+    deviceOrient.gamma = e.gamma || 0;
+  }
+
+  const Q1 = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5));
+  function updateCameraFromOrientation(){
+    const alpha = THREE.MathUtils.degToRad(deviceOrient.alpha);
+    const beta = THREE.MathUtils.degToRad(deviceOrient.beta);
+    const gamma = THREE.MathUtils.degToRad(deviceOrient.gamma);
+    const euler = new THREE.Euler(beta, alpha, -gamma, 'YXZ');
+    camera.quaternion.setFromEuler(euler);
+    camera.quaternion.multiply(Q1);
+  }
+
+  // --- mouse fallback (desktop testing) ---
+  function setupMouseFallback(){
+    let dragging = false, lastX = 0, lastY = 0;
+    renderer.domElement.addEventListener('mousedown', e => { dragging = true; lastX = e.clientX; lastY = e.clientY; });
+    window.addEventListener('mouseup', () => dragging = false);
+    window.addEventListener('mousemove', e => {
+      if (!dragging) return;
+      usingMouse = true;
+      const dx = e.clientX - lastX, dy = e.clientY - lastY;
+      lastX = e.clientX; lastY = e.clientY;
+      mouseLook.x -= dx * 0.005;
+      mouseLook.y -= dy * 0.005;
+      mouseLook.y = Math.max(-1.4, Math.min(1.4, mouseLook.y));
+    });
+  }
+
+  function startGame(){
+    document.getElementById('startScreen').style.display = 'none';
+
+    const DOE = window.DeviceOrientationEvent;
+    if (DOE && typeof DOE.requestPermission === 'function') {
+      DOE.requestPermission().then(state => {
+        if (state === 'granted') {
+          window.addEventListener('deviceorientation', handleOrientation);
+          orientationEnabled = true;
+        } else {
+          setupMouseFallback();
+          orientationEnabled = true;
+          msgEl.textContent = 'ジャイロが使えへんかったのら。ドラッグで見渡してや';
+        }
+      }).catch(() => {
+        setupMouseFallback();
+        orientationEnabled = true;
+        msgEl.textContent = 'ジャイロが使えへんかったのら。ドラッグで見渡してや';
+      });
+    } else if (DOE) {
+      window.addEventListener('deviceorientation', handleOrientation);
+      setupMouseFallback();
+      orientationEnabled = true;
+    } else {
+      setupMouseFallback();
+      orientationEnabled = true;
+      msgEl.textContent = 'このブラウザはジャイロ非対応やで。ドラッグで見渡してや';
+    }
+  }
+
+  function onResize(){
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  }
+
+  function animate(){
+    requestAnimationFrame(animate);
+    if (orientationEnabled) {
+      if (usingMouse) {
+        camera.rotation.order = 'YXZ';
+        camera.rotation.y = mouseLook.x;
+        camera.rotation.x = mouseLook.y;
+      } else {
+        updateCameraFromOrientation();
+      }
+    }
+    updateTargets();
+    updateProjectiles();
+    updateFragments();
+    renderer.render(scene, camera);
+  }
+})();
+</script>
+</body>
+</html>
